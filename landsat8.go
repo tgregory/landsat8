@@ -10,7 +10,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -190,6 +189,10 @@ func (r *HttpRepository) get(url string, cached string, cache bool) (io.ReadClos
 		if !cache {
 			return res.Body, err
 		}
+		if nil != err {
+			log.Printf("Request failed: %v\n", err)
+			return nil, err
+		}
 		defer res.Body.Close()
 		if nil != err {
 			log.Printf("Download failed: %v\n", err)
@@ -213,17 +216,17 @@ func (r *HttpRepository) get(url string, cached string, cache bool) (io.ReadClos
 
 func (r *HttpRepository) getMeta(id string, baseUrl string) (io.ReadCloser, error) {
 	fname := id + "_MTL.txt"
-	return r.get(path.Join(baseUrl, fname), filepath.Join(r.CachePath, metaDir, id+fname), !r.NoCacheMeta)
+	return r.get(baseUrl+fname, filepath.Join(r.CachePath, metaDir, id+fname), !r.NoCacheMeta)
 }
 
 func (r *HttpRepository) getBand(id string, band int, baseUrl string) (io.ReadCloser, error) {
 	fname := fmt.Sprintf("%s_B%d.TIF", id, band)
-	return r.get(path.Join(baseUrl, fname), filepath.Join(r.CachePath, bandDir, fname), r.CacheBands)
+	return r.get(baseUrl+fname, filepath.Join(r.CachePath, bandDir, fname), r.CacheBands)
 }
 
 func (r *HttpRepository) getBQA(id string, baseUrl string) (io.ReadCloser, error) {
 	fname := id + "_BQA.TIF"
-	return r.get(path.Join(baseUrl, fname), filepath.Join(r.CachePath, bandDir, fname), r.CacheBands)
+	return r.get(baseUrl+fname, filepath.Join(r.CachePath, bandDir, fname), r.CacheBands)
 }
 
 var zerod = Time{}
@@ -318,7 +321,7 @@ func main() {
 
 					if !day {
 						dir := filepath.Join(dpath, scene.Id())
-						err = os.MkdirAll(dir, os.ModeDir)
+						err = os.MkdirAll(dir, os.ModeDir|os.ModePerm)
 						if nil != err {
 							log.Printf("Failed to create storage directory: %v\n", err)
 							return
@@ -399,6 +402,7 @@ func main() {
 							}
 						}
 
+						log.Printf("Done with %s\n", scene.Id())
 						ids <- scene.Id()
 					}
 				}()
