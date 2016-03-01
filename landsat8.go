@@ -68,7 +68,7 @@ const (
 type Scene interface {
 	Id() string
 	Acquisition() time.Time
-	CloudCover() int
+	CloudCover() float64
 	ProcessingLevel() plevel
 	IsDay() (bool, error)
 	GetBQA() (io.ReadCloser, error)
@@ -88,7 +88,7 @@ type httpScene struct {
 	repo            *HttpRepository
 	id              string
 	acquisitionDate time.Time
-	cloudCover      int
+	cloudCover      float64
 	processingLevel plevel
 	baseUrl         string
 	meta            *meta
@@ -102,7 +102,7 @@ func (s *httpScene) Acquisition() time.Time {
 	return s.acquisitionDate
 }
 
-func (s *httpScene) CloudCover() int {
+func (s *httpScene) CloudCover() float64 {
 	return s.cloudCover
 }
 
@@ -159,7 +159,7 @@ func (r *HttpRepository) GetScene(rec []string) (Scene, error) {
 	if nil != err {
 		return nil, err
 	}
-	cc, err := strconv.Atoi(rec[2])
+	cc, err := strconv.ParseFloat(rec[2], 64)
 	if nil != err {
 		return nil, err
 	}
