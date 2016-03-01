@@ -245,7 +245,7 @@ func main() {
 	flag.Var(&to, "t", "Lookup scenes no older than this day.")
 	flag.StringVar(&descDir, "d", "metadata", "Directory to save description files to.")
 	flag.IntVar(&nworkers, "n", 4, "Number of simultaneous parallel downloads.")
-	flag.StringVar(&sceneFile, "s", "scene_file", "Scene list file.")
+	flag.StringVar(&sceneFile, "s", "scene_list", "Scene list file.")
 	flag.StringVar(&result, "r", "result.txt", "Result of id query.")
 	flag.Var(&bands, "b", "List of bands.")
 	flag.BoolVar(&bqa, "bqa", false, "Download BQA.")
