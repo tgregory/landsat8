@@ -18,7 +18,9 @@ import (
 )
 
 var (
-	UnexpectedLevel = errors.New("Unexpected processing level")
+	UnexpectedLevel    = errors.New("Unexpected processing level")
+	UnexpectedDayNight = errors.New("Unexpected day/night value.")
+	PointParse         = errors.New("Failed to parse point.")
 )
 
 const metaDir = "metadata"
@@ -67,6 +69,7 @@ const (
 type Scene interface {
 	Id() string
 	Acquisition() time.Time
+	Contains(p Point) bool
 	CloudCover() float64
 	ProcessingLevel() plevel
 	IsDay() (bool, error)
@@ -87,6 +90,10 @@ type httpScene struct {
 	repo            *HttpRepository
 	id              string
 	acquisitionDate time.Time
+	minLon          float64
+	minLat          float64
+	maxLon          float64
+	maxLat          float64
 	cloudCover      float64
 	processingLevel plevel
 	baseUrl         string
@@ -99,6 +106,11 @@ func (s *httpScene) Id() string {
 
 func (s *httpScene) Acquisition() time.Time {
 	return s.acquisitionDate
+}
+
+func (s *httpScene) Contains(p Point) bool {
+	return p.Lon >= s.minLon && p.Lon <= s.maxLon &&
+		p.Lat >= s.minLat && p.Lat <= s.maxLat
 }
 
 func (s *httpScene) CloudCover() float64 {
@@ -170,10 +182,31 @@ func (r *HttpRepository) GetScene(rec []string) (Scene, error) {
 	} else {
 		return nil, UnexpectedLevel
 	}
+	minLat, err := strconv.ParseFloat(rec[6], 64)
+	if nil != err {
+		return nil, err
+	}
+	minLon, err := strconv.ParseFloat(rec[7], 64)
+	if nil != err {
+		return nil, err
+	}
+	maxLat, err := strconv.ParseFloat(rec[8], 64)
+	if nil != err {
+		return nil, err
+	}
+	maxLon, err := strconv.ParseFloat(rec[9], 64)
+	if nil != err {
+		return nil, err
+	}
+
 	return &httpScene{
 		r,
 		rec[0],
 		accDate,
+		minLon,
+		minLat,
+		maxLon,
+		maxLat,
 		cc,
 		pl,
 		strings.TrimSuffix(rec[10], `index.html`),
@@ -229,6 +262,71 @@ func (r *HttpRepository) getBQA(id string, baseUrl string) (io.ReadCloser, error
 	return r.get(baseUrl+fname, filepath.Join(r.CachePath, bandDir, fname), r.CacheBands)
 }
 
+type dayNight string
+
+func ParseDayNight(v string) (dayNight, error) {
+	v = strings.ToUpper(v)
+	switch v {
+	case "DAY":
+		return Day, nil
+	case "NIGHT":
+		return Night, nil
+	case "BOTH":
+		fallthrough
+	case "":
+		return Both, nil
+	default:
+		return Both, UnexpectedDayNight
+	}
+}
+
+func (dn *dayNight) String() string {
+	if nil == dn {
+		return "BOTH"
+	}
+	return string(*dn)
+}
+
+const (
+	Day   = dayNight("DAY")
+	Night = dayNight("NIGHT")
+	Both  = dayNight("BOTH")
+)
+
+type Point struct {
+	Lon float64
+	Lat float64
+}
+
+func ParsePoint(v string) (*Point, error) {
+	if "IGNORED" == v {
+		return nil, nil
+	}
+	vs := strings.Split(v, ";")
+	if len(vs) != 2 {
+		return nil, PointParse
+	}
+	lon, err := strconv.ParseFloat(vs[0], 64)
+	if nil != err {
+		return nil, PointParse
+	}
+	lat, err := strconv.ParseFloat(vs[1], 64)
+	if nil != err {
+		return nil, PointParse
+	}
+	return &Point{
+		lon,
+		lat,
+	}, nil
+}
+
+func (p *Point) String() string {
+	if nil == p {
+		return "IGNORED"
+	}
+	return fmt.Sprintf("%f;%f", p.Lon, p.Lat)
+}
+
 var zerod = Time{}
 
 var from Time
@@ -242,6 +340,9 @@ var retries int
 var bands ints
 var bqa bool
 var dpath string
+var daynight dayNight
+var clouds float64
+var at *Point
 
 func main() {
 	flag.Var(&from, "f", "Lookup scenes starting from this day.")
@@ -255,7 +356,22 @@ func main() {
 	flag.StringVar(&dpath, "p", "download", "Path where data will be stored.")
 	flag.DurationVar(&timeout, "timeout", 20*time.Minute, "HTTP request timeout.")
 	flag.IntVar(&retries, "retries", 3, "Number of save retries.")
+	var sdaynight string
+	flag.StringVar(&sdaynight, "dn", "BOTH", "Day, night or both.")
+	flag.Float64Var(&clouds, "cc", 20., "Cloud cover.")
+	var sat string
+	flag.StringVar(&sat, "at", "IGNORED", "Scene must contain this point.")
 	flag.Parse()
+
+	daynight, err := ParseDayNight(sdaynight)
+	if nil != err {
+		panic(err)
+	}
+
+	at, err := ParsePoint(sat)
+	if nil != err {
+		panic(err)
+	}
 
 	if nworkers <= 0 {
 		nworkers = 1
@@ -308,103 +424,114 @@ func main() {
 					if scene.Acquisition().Before(time.Time(from)) || scene.Acquisition().After(time.Time(to)) {
 						return
 					}
-					for rtrs = retries; rtrs > 0; rtrs-- {
-						day, err = scene.IsDay()
-						if nil == err {
-							break
+					if nil != at && !scene.Contains(*at) {
+						return
+					}
+					if scene.CloudCover() > clouds {
+						return
+					}
+					if Both != daynight {
+						for rtrs = retries; rtrs > 0; rtrs-- {
+							day, err = scene.IsDay()
+							if nil == err {
+								break
+							}
+						}
+						if 0 == rtrs {
+							log.Printf("Failed to determine if scene is nighttime: %v\n", err)
+							return
+						}
+
+						if (!day && daynight == Day) || (day && daynight == Night) {
+							return
 						}
 					}
+
+					dir := filepath.Join(dpath, scene.Id())
+					err = os.MkdirAll(dir, os.ModeDir|os.ModePerm)
+					if nil != err {
+						log.Printf("Failed to create storage directory: %v\n", err)
+						return
+					}
+					fname := scene.Id() + "_MTL.txt"
+					fpath := filepath.Join(dir, fname)
+					for rtrs = retries; rtrs > 0; rtrs-- {
+						out, err := os.Create(fpath)
+						defer out.Close()
+						if nil != err {
+							log.Printf("Failed to create meta output file: %v\n", err)
+							return
+						}
+						meta, err := scene.GetMeta()
+						if nil != err {
+							continue
+						}
+						_, err = io.Copy(out, meta)
+						if nil != err {
+							continue
+						}
+						break
+					}
 					if 0 == rtrs {
-						log.Printf("Failed to determine if scene is nighttime: %v\n", err)
+						log.Printf("Failed to download meta: %v\n", err)
 						return
 					}
 
-					if !day {
-						dir := filepath.Join(dpath, scene.Id())
-						err = os.MkdirAll(dir, os.ModeDir|os.ModePerm)
-						if nil != err {
-							log.Printf("Failed to create storage directory: %v\n", err)
-							return
-						}
-						fname := scene.Id() + "_MTL.txt"
+					if bqa {
+						fname := scene.Id() + "_BQA.TIF"
 						fpath := filepath.Join(dir, fname)
 						for rtrs = retries; rtrs > 0; rtrs-- {
 							out, err := os.Create(fpath)
 							defer out.Close()
 							if nil != err {
-								log.Printf("Failed to create meta output file: %v\n", err)
+								log.Printf("Failed to create BQA output file: %v\n", err)
 								return
 							}
-							meta, err := scene.GetMeta()
+							qual, err := scene.GetBQA()
 							if nil != err {
 								continue
 							}
-							_, err = io.Copy(out, meta)
+							_, err = io.Copy(out, qual)
 							if nil != err {
 								continue
 							}
 							break
 						}
 						if 0 == rtrs {
-							log.Printf("Failed to download meta: %v\n", err)
+							log.Printf("Failed to download bqa: %v\n", err)
 							return
 						}
-
-						if bqa {
-							fname := scene.Id() + "_BQA.TIF"
-							fpath := filepath.Join(dir, fname)
-							for rtrs = retries; rtrs > 0; rtrs-- {
-								out, err := os.Create(fpath)
-								defer out.Close()
-								if nil != err {
-									log.Printf("Failed to create BQA output file: %v\n", err)
-									return
-								}
-								qual, err := scene.GetBQA()
-								if nil != err {
-									continue
-								}
-								_, err = io.Copy(out, qual)
-								if nil != err {
-									continue
-								}
-								break
-							}
-							if 0 == rtrs {
-								log.Printf("Failed to download bqa: %v\n", err)
-								return
-							}
-						}
-
-						for _, band := range bands {
-							fname := fmt.Sprintf("%s_B%d.TIF", scene.Id(), band)
-							fpath := filepath.Join(dir, fname)
-							for rtrs = retries; rtrs > 0; rtrs-- {
-								out, err := os.Create(fpath)
-								defer out.Close()
-								if nil != err {
-									log.Printf("Failed to create band output file: %v\n", err)
-									return
-								}
-								ban, err := scene.GetBand(band)
-								if nil != err {
-									continue
-								}
-								_, err = io.Copy(out, ban)
-								if nil != err {
-									continue
-								}
-								break
-							}
-							if 0 == rtrs {
-								log.Printf("Failed to download band: %v\n", err)
-								return
-							}
-						}
-
-						log.Printf("Done with %s\n", scene.Id())
-						ids <- scene.Id()
 					}
+
+					for _, band := range bands {
+						fname := fmt.Sprintf("%s_B%d.TIF", scene.Id(), band)
+						fpath := filepath.Join(dir, fname)
+						for rtrs = retries; rtrs > 0; rtrs-- {
+							out, err := os.Create(fpath)
+							defer out.Close()
+							if nil != err {
+								log.Printf("Failed to create band output file: %v\n", err)
+								return
+							}
+							ban, err := scene.GetBand(band)
+							if nil != err {
+								continue
+							}
+							_, err = io.Copy(out, ban)
+							if nil != err {
+								continue
+							}
+							break
+						}
+						if 0 == rtrs {
+							log.Printf("Failed to download band: %v\n", err)
+							return
+						}
+					}
+
+					log.Printf("Done with %s\n", scene.Id())
+					ids <- scene.Id()
+
 				}()
 			}
 		}()
